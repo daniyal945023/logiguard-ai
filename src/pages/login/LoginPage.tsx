@@ -8,7 +8,9 @@ import { navigate } from '@/lib/router';
 import { Logo } from '@/components/common/Logo';
 import { useSession } from '@/services/session';
 
-function getMagicLinkError() {
+type LoginMode = 'signIn' | 'resetPassword' | 'updatePassword';
+
+function getAuthCallbackError() {
   const hash = window.location.hash;
   const params = hash.startsWith('#error=')
     ? new URLSearchParams(hash.slice(1))
@@ -18,45 +20,88 @@ function getMagicLinkError() {
   if (!description && !code) return null;
 
   if (code === 'otp_expired' || /expired|invalid/i.test(description ?? '')) {
-    return 'This sign-in link has expired or is invalid. Request a new one.';
+    return 'This link has expired or is invalid. Request a new password reset link.';
   }
-  return description ?? 'Could not complete sign-in. Please request a new link.';
+  return description ?? 'Could not complete password recovery. Please request a new link.';
+}
+
+function isPasswordRecoveryCallback() {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  return params.get('type') === 'recovery';
 }
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [mode, setMode] = useState<LoginMode>(() => (
+    isPasswordRecoveryCallback() ? 'updatePassword' : 'signIn'
+  ));
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [linkSent, setLinkSent] = useState(false);
-  const [magicLinkError] = useState(getMagicLinkError);
-  const { status, error: sessionError, profile, signIn } = useSession();
+  const [notice, setNotice] = useState<string | null>(null);
+  const [authCallbackError] = useState(getAuthCallbackError);
+  const {
+    status,
+    error: sessionError,
+    profile,
+    isPasswordRecovery,
+    signIn,
+    requestPasswordReset,
+    updatePassword,
+  } = useSession();
 
   useEffect(() => {
-    if (magicLinkError) {
+    if (authCallbackError) {
       window.history.replaceState(null, '', `${window.location.pathname}#/login`);
     }
-  }, [magicLinkError]);
+  }, [authCallbackError]);
 
   useEffect(() => {
-    if (status === 'authenticated' && profile) {
+    if (isPasswordRecovery) setMode('updatePassword');
+  }, [isPasswordRecovery]);
+
+  useEffect(() => {
+    if (status === 'authenticated' && profile && !isPasswordRecovery && mode !== 'updatePassword') {
       navigate(profile.role === 'supplier' ? '/supplier' : '/manager');
     }
-  }, [status, profile]);
+  }, [status, profile, isPasswordRecovery, mode]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
     setFormError(null);
-    setLinkSent(false);
+    setNotice(null);
     try {
-      await signIn(email);
-      setLinkSent(true);
+      if (mode === 'signIn') {
+        await signIn(email, password);
+      } else if (mode === 'resetPassword') {
+        await requestPasswordReset(email);
+        setNotice('If an account exists for this email, a password reset link will be sent.');
+      } else {
+        if (password !== confirmPassword) {
+          throw new Error('The passwords do not match.');
+        }
+        await updatePassword(password);
+        setPassword('');
+        setConfirmPassword('');
+        setNotice('Password updated. Redirecting to your portal…');
+        setMode('signIn');
+      }
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Sign-in failed. Please try again.');
+      setFormError(error instanceof Error ? error.message : 'The request failed. Please try again.');
     } finally {
       setSubmitting(false);
     }
   }
+
+  function changeMode(nextMode: LoginMode) {
+    setMode(nextMode);
+    setFormError(null);
+    setNotice(null);
+  }
+
+  const recoveryMode = mode === 'updatePassword';
 
   return (
     <div className="grid min-h-screen bg-background lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
@@ -69,9 +114,13 @@ export function LoginPage() {
           </div>
 
           <div className="mt-2 lg:mt-0">
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Sign in to your portal</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+              {recoveryMode ? 'Set your password' : mode === 'resetPassword' ? 'Reset your password' : 'Sign in to your portal'}
+            </h1>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-              Northstar Logistics operations, for managers and supplier partners.
+              {recoveryMode
+                ? 'Choose a password for your Northstar Logistics account.'
+                : 'Northstar Logistics operations, for managers and supplier partners.'}
             </p>
           </div>
 
@@ -83,32 +132,72 @@ export function LoginPage() {
           </div>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-5">
-            <div className="space-y-2">
-              <Label htmlFor="email">Work email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@northstarlogistics.com"
-                required
-                value={email}
-                onChange={(event) => {
-                  setEmail(event.target.value);
-                  setFormError(null);
-                  setLinkSent(false);
-                }}
-                className="h-11 border-border bg-card"
-              />
-            </div>
+            {!recoveryMode && (
+              <div className="space-y-2">
+                <Label htmlFor="email">Work email</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@northstarlogistics.com"
+                  required
+                  value={email}
+                  onChange={(event) => {
+                    setEmail(event.target.value);
+                    setFormError(null);
+                    setNotice(null);
+                  }}
+                  className="h-11 border-border bg-card"
+                />
+              </div>
+            )}
 
-            {(formError || magicLinkError || (status === 'error' && sessionError)) && (
+            {(mode === 'signIn' || recoveryMode) && (
+              <div className="space-y-2">
+                <Label htmlFor="password">{recoveryMode ? 'New password' : 'Password'}</Label>
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete={recoveryMode ? 'new-password' : 'current-password'}
+                  minLength={recoveryMode ? 8 : undefined}
+                  required
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    setFormError(null);
+                  }}
+                  className="h-11 border-border bg-card"
+                />
+              </div>
+            )}
+
+            {recoveryMode && (
+              <div className="space-y-2">
+                <Label htmlFor="confirm-password">Confirm new password</Label>
+                <Input
+                  id="confirm-password"
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  value={confirmPassword}
+                  onChange={(event) => {
+                    setConfirmPassword(event.target.value);
+                    setFormError(null);
+                  }}
+                  className="h-11 border-border bg-card"
+                />
+              </div>
+            )}
+
+            {(formError || authCallbackError || (status === 'error' && sessionError)) && (
               <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">
-                {formError ?? magicLinkError ?? sessionError}
+                {formError ?? authCallbackError ?? sessionError}
               </p>
             )}
-            {linkSent && (
+            {notice && (
               <p role="status" className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5 text-sm text-foreground">
-                Check your email for your sign-in link.
+                {notice}
               </p>
             )}
             {status === 'loading' && !submitting && (
@@ -118,13 +207,34 @@ export function LoginPage() {
             )}
 
             <Button type="submit" disabled={submitting} className="h-11 w-full gap-2 text-sm font-semibold">
-              {submitting ? 'Sending sign-in link…' : 'Email me a sign-in link'}
+              {submitting
+                ? 'Please wait…'
+                : recoveryMode
+                  ? 'Save new password'
+                  : mode === 'resetPassword'
+                    ? 'Send password reset link'
+                    : 'Sign in'}
               {submitting ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
             </Button>
+
+            {mode === 'signIn' && (
+              <div className="text-center">
+                <Button type="button" variant="link" className="h-auto p-0 text-sm" onClick={() => changeMode('resetPassword')}>
+                  Forgot or need to set your password?
+                </Button>
+              </div>
+            )}
+            {mode === 'resetPassword' && (
+              <div className="text-center">
+                <Button type="button" variant="link" className="h-auto p-0 text-sm" onClick={() => changeMode('signIn')}>
+                  Back to sign in
+                </Button>
+              </div>
+            )}
           </form>
 
           <p className="mt-8 text-center text-xs text-muted-foreground">
-            Password-free sign-in for authorized Northstar Logistics personnel and partners.
+            Password access for authorized Northstar Logistics personnel and partners.
           </p>
         </div>
       </div>

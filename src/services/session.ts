@@ -31,7 +31,10 @@ interface SessionState {
 }
 
 interface SessionContextValue extends SessionState {
-  signIn: (email: string) => Promise<void>;
+  isPasswordRecovery: boolean;
+  signIn: (email: string, password: string) => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
+  updatePassword: (password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -81,6 +84,7 @@ async function loadProfile(userId: string): Promise<UserProfile> {
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SessionState>(initialState);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
   const stateRef = useRef(state);
   const sessionRevision = useRef(0);
   stateRef.current = state;
@@ -119,6 +123,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       authEventReceived = true;
+      if (event === 'PASSWORD_RECOVERY') setIsPasswordRecovery(true);
+      if (event === 'SIGNED_OUT') setIsPasswordRecovery(false);
       const current = stateRef.current;
       if (
         (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') &&
@@ -158,29 +164,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
   }, [syncSession]);
 
-  const signIn = useCallback(async (email: string) => {
+  const signIn = useCallback(async (email: string, password: string) => {
     const normalizedEmail = email.trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       throw new Error('Enter a valid email address.');
     }
+    if (!password) throw new Error('Enter your password.');
 
     sessionRevision.current += 1;
     const revision = sessionRevision.current;
     setState((current) => ({ ...current, status: 'loading', error: null }));
 
     try {
-      const { error } = await supabase.auth.signInWithOtp({
+      const { error } = await supabase.auth.signInWithPassword({
         email: normalizedEmail,
-        options: {
-          shouldCreateUser: false,
-          emailRedirectTo: 'http://localhost:5173',
-        },
+        password,
       });
       if (error) throw new Error(error.message);
-
-      if (sessionRevision.current === revision) {
-        setState({ status: 'unauthenticated', session: null, profile: null, error: null });
-      }
     } catch (error) {
       const message = getErrorMessage(error);
       if (sessionRevision.current === revision) {
@@ -194,21 +194,45 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const requestPasswordReset = useCallback(async (email: string) => {
+    const normalizedEmail = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      throw new Error('Enter a valid email address.');
+    }
+
+    const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
+      redirectTo: window.location.origin,
+    });
+    if (error) throw new Error(error.message);
+  }, []);
+
+  const updatePassword = useCallback(async (password: string) => {
+    if (password.length < 8) throw new Error('Use a password with at least 8 characters.');
+
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) throw new Error(error.message);
+    setIsPasswordRecovery(false);
+  }, []);
+
   const signOut = useCallback(async () => {
     sessionRevision.current += 1;
     const revision = sessionRevision.current;
     const { error } = await supabase.auth.signOut();
     if (error) throw new Error(`Could not sign out: ${error.message}`);
     if (sessionRevision.current === revision) {
+      setIsPasswordRecovery(false);
       setState({ status: 'unauthenticated', session: null, profile: null, error: null });
     }
   }, []);
 
   const value = useMemo<SessionContextValue>(() => ({
     ...state,
+    isPasswordRecovery,
     signIn,
+    requestPasswordReset,
+    updatePassword,
     signOut,
-  }), [state, signIn, signOut]);
+  }), [state, isPasswordRecovery, signIn, requestPasswordReset, updatePassword, signOut]);
 
   return createElement(SessionContext.Provider, { value, children });
 }
